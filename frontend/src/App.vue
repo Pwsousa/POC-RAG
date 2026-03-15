@@ -123,27 +123,37 @@ const MOCK_BRIEF: { blocks: AnswerBlock[]; citations: Citation[]; disclaimer: st
   ]
 }
 
-const handleSubmit = () => {
+const handleSubmit = async () => {
   if (!query.value.trim() || isProcessing.value) return
   const q = query.value.trim()
   query.value = ''
   isProcessing.value = true
 
-  setTimeout(() => {
-    const mock = mode.value === 'qa' ? MOCK_QA : MOCK_BRIEF
-    const result: ResultData = {
-      id: crypto.randomUUID(),
-      query: q,
-      mode: mode.value,
-      blocks: mock.blocks,
-      citations: mock.citations,
-      disclaimer: mock.disclaimer,
-      timestamp: new Date().toLocaleDateString('pt-BR')
+  try {
+    const response = await fetch('http://localhost:8000/chat', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        query: q,
+        mode: mode.value
+      })
+    })
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`)
     }
+
+    const result = await response.json()
     currentResult.value = result
     history.value = [result, ...history.value]
+  } catch (error) {
+    console.error('Error fetching chat response:', error)
+    // Handle error UI if needed
+  } finally {
     isProcessing.value = false
-  }, 1500)
+  }
 }
 
 const handleSelectHistory = (item: ResultData) => {
