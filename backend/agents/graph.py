@@ -6,6 +6,8 @@ from langgraph.graph import StateGraph, END
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 import re
+import os
+from collections import OrderedDict
 
 # Define the state of our agentic workflow
 class AgentState(TypedDict):
@@ -49,19 +51,21 @@ def parse_answer_to_blocks(answer: str, citations: List[Dict[str, Any]]) -> List
     return blocks
 
 class AgentGraph:
-    def __init__(self, model_name: str = "llama3.1"):
-        self.llm = ChatOllama(model=model_name, temperature=0)
+    def __init__(self, model_name: str = None):
+        selected_model = model_name or os.getenv("OLLAMA_MODEL", "llama3.1")
+        base_url = os.getenv("OLLAMA_BASE_URL", None)
+        temperature = float(os.getenv("OLLAMA_TEMPERATURE", "0"))
+        if base_url:
+            self.llm = ChatOllama(model=selected_model, temperature=temperature, base_url=base_url)
+        else:
+            self.llm = ChatOllama(model=selected_model, temperature=temperature)
+        print(f"[AgentGraph] LLM: ChatOllama model={selected_model} base_url={base_url or 'default'} temp={temperature}")
+        self._cache = OrderedDict()
+        self._cache_capacity = int(os.getenv("RETRIEVER_CACHE_SIZE", "128"))
         
     def supervisor(self, state: AgentState) -> Dict[str, Any]:
         """Routes the user query."""
-        prompt = ChatPromptTemplate.from_template(
-            "Você é um supervisor de um sistema RAG sobre o clima (IPCC AR6).\n"
-            "Query: {query}\n"
-            "Decida se esta query é uma pergunta direta ('qa'), um pedido de relatório/briefing ('brief') ou se deve ser recusada ('refuse')."
-        )
-        msg = self.llm.invoke(prompt.format(query=state['query']))
-        content = msg.content.lower()
-        
+        content = state["query"].lower()
         route = 'qa'
         if 'brief' in content or 'relatório' in content or 'resumo' in content:
             route = 'brief'
@@ -72,7 +76,32 @@ class AgentGraph:
 
     def retriever(self, state: AgentState, retriever_obj) -> Dict[str, Any]:
         """Retrieves documents from vector store."""
-        docs = retriever_obj.invoke(state['query'])
+        q = state['query'].strip()
+        if q in self._cache:
+            docs = self._cache.pop(q)
+            self._cache[q] = docs
+        else:
+            docs = retriever_obj.invoke(q)
+            if len(self._cache) >= self._cache_capacity:
+                self._cache.popitem(last=False)
+            self._cache[q] = docs
+        # Deduplicate by (source_url or source, page)
+        unique = []
+        seen = set()
+        for d in docs:
+            key = (d.metadata.get("source_url") or d.metadata.get("source"), d.metadata.get("page", 0))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(d)
+        # Cap to a small number for faster context-to-LLM interaction
+        max_docs = int(os.getenv("MAX_CTX_DOCS", "3"))
+        docs = unique[:max_docs]
+        try:
+            sources = [d.metadata.get("source", "N/A") for d in docs]
+            print(f"[AgentGraph] Retrieved {len(docs)} docs | sources={sources[:5]}")
+        except Exception:
+            pass
         return {"context": docs, "steps": state.get("steps", []) + ["retriever"]}
 
     def safety(self, state: AgentState) -> Dict[str, Any]:
@@ -104,24 +133,38 @@ class AgentGraph:
                 "steps": state.get("steps", []) + ["writer_empty_context"]
             }
         prompt = ChatPromptTemplate.from_template(
-            "Com base no contexto abaixo, responda à pergunta do usuário usando citações numeradas como [1], [2].\n"
-            "Contexto: {context}\n"
+            "Responda APENAS com base no contexto fornecido e insira citações numeradas [1], [2] correspondentes aos trechos.\n"
+            "Se o contexto não trouxer evidência suficiente, responda: \"Não encontrei evidências suficientes nos documentos indexados para responder com segurança.\"\n"
+            "Contexto:\n{context}\n"
             "Pergunta: {query}\n"
-            "Resposta em Português:"
+            "Resposta em Português com citações numeradas:"
         )
-        context_str = "\n".join([f"[{i+1}] {d.page_content} (Fonte: {d.metadata.get('source', 'N/A')})" for i, d in enumerate(state['context'][:3])])
+        max_ctx = min(2, len(state['context']))
+        context_str = "\n".join([
+            f"[{i+1}] {d.page_content[:600]} (Fonte: {os.path.basename(d.metadata.get('source', 'N/A')) if isinstance(d.metadata.get('source', ''), str) else d.metadata.get('source', 'N/A')})"
+            for i, d in enumerate(state['context'][:max_ctx])
+        ])
+        print(f"[AgentGraph] Writing answer using {len(state['context'])} context docs")
         msg = self.llm.invoke(prompt.format(context=context_str, query=state['query']))
         
         # Extract citations
         citations = []
-        for i, doc in enumerate(state['context']):
+        for i, doc in enumerate(state['context'][:max_ctx]):
+            src = doc.metadata.get("source", "IPCC AR6")
+            is_url = isinstance(src, str) and src.startswith("http")
+            document_name = src if is_url else os.path.basename(src) if isinstance(src, str) else "IPCC AR6"
+            url = doc.metadata.get("source_url")
+            if not url and is_url:
+                url = src
             citations.append({
                 "id": i + 1,
                 "text": doc.page_content,
-                "document": doc.metadata.get("source", "IPCC AR6"),
-                "page": doc.metadata.get("page", 0)
+                "document": document_name,
+                "page": doc.metadata.get("page", 0),
+                "url": url
             })
-            
+        
+        print(f"[AgentGraph] Answer length={len(msg.content)} chars | citations={len(citations)}")
         blocks = parse_answer_to_blocks(msg.content, citations)
         return {"answer": msg.content, "blocks": blocks, "citations": citations, "steps": state.get("steps", []) + ["writer"]}
 
@@ -132,15 +175,10 @@ class AgentGraph:
                 "is_faithful": True,
                 "steps": state.get("steps", []) + ["self_check_empty_context"]
             }
-        prompt = ChatPromptTemplate.from_template(
-            "Verifique se a resposta abaixo é totalmente suportada pelo contexto fornecido.\n"
-            "Contexto: {context}\n"
-            "Resposta: {answer}\n"
-            "Responda 'Sim' ou 'Não'."
-        )
-        context_str = "\n".join([d.page_content for d in state['context'][:3]])
-        msg = self.llm.invoke(prompt.format(context=context_str, answer=state['answer']))
-        is_faithful = "sim" in msg.content.lower()
+        answer = state.get("answer", "")
+        has_citations = bool(state.get("citations"))
+        cites_in_text = bool(re.search(r"\[\d+\]", answer))
+        is_faithful = has_citations and cites_in_text
         retry_count = state.get("retry_count", 0)
         if not is_faithful:
             retry_count += 1

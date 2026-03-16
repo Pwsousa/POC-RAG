@@ -12,6 +12,7 @@ export interface Citation {
   document: string
   page: number
   section?: string
+  url?: string
 }
 
 export interface ResultData {

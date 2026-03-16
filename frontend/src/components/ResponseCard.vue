@@ -40,6 +40,7 @@ defineProps<{
           <span class="reference-id">[{{ citation.id }}]</span>
           {{ citation.document }}, p. {{ citation.page }}
           <span v-if="citation.section"> · §{{ citation.section }}</span>
+          <span v-if="citation.url"> · <a :href="citation.url" target="_blank" rel="noopener noreferrer">link</a></span>
         </p>
       </div>
     </div>

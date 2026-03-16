@@ -98,10 +98,57 @@ python backend/ingest/processor.py
 
 ## 📊 Avaliação
 
-Utilize o framework `Ragas` localizado em `backend/eval/` para medir:
-- **Faithfulness**: Garantia de que a resposta não alucina.
-- **Answer Relevancy**: Precisão da resposta em relação à pergunta.
-- **Context Recall**: Eficiência da recuperação de documentos.
+Conjunto de testes sugerido:
+- 10–20 perguntas rotuladas. Exemplos:
+  - Tendência do nível do mar.
+  - Principais drivers do aquecimento pós‑1850 
+  - Mudanças em extremos de precipitação.
+  - Projeções de nível do mar por cenário SSP .
+  - Evidências sobre criosfera .
+  - Perguntas ambíguas que exigem clarificação (p.ex., “E a chuva no Brasil?”).
+
+Métricas:
+- Context Precision / Context Recall.
+- Faithfulness.
+- Answer Relevancy.
+- Latência end‑to‑end.
+
+RAGAS/Giskard:
+- RAGAS para medir Faithfulness, Answer Relevancy, Context Precision/Recall (docs em https://docs.ragas.io).
+- Giskard para testes de regressão e validações de qualidade.
 
 ## 📝 Licença
 Este projeto é distribuído sob a licença MIT.
+
+## ⚙️ Automação (Mínimo Viável)
+- Tarefas:
+  - Brief semanal dos principais achados (Input: corpus atual; Output: markdown em `data/output`).
+  - Sumário de evidências por tema (Input: termo, ex. “nível do mar”; Output: bullets com citações).
+  - Relatório de incertezas (Input: tópico; Output: lista de incertezas com níveis de confiança).
+  - Top‑N trechos por pergunta (Input: query; Output: N trechos com links).
+  - Auditoria de citações (Input: resposta; Output: verificação e score de fidelidade).
+- Medir:
+  - Taxa de sucesso por tarefa.
+  - Nº médio de passos na execução.
+  - Tempo médio por tarefa.
+
+## 🧩 MCP (Model Context Protocol)
+- Servidor local em `backend/mcp/server.py`.
+- Ferramentas:
+  - `write_report(filename, content)`: grava `.txt`/`.md` em `data/output`.
+  - `list_reports()`: lista arquivos em `data/output`.
+- Controles:
+  - Allowlist de extensões: apenas `.txt` e `.md`.
+  - Escopo de escrita restrito a `data/output`.
+  - Logs via API e console do backend.
+  - O que o agente não pode fazer: escrever fora de `data/output`, criar outros tipos de arquivo, acessar recursos remotos sem rota definida.
+
+## 🔬 Prompt e Recuperação
+- Prompt reforçado para:
+  - Responder apenas com base no contexto.
+  - Incluir citações numeradas [n] vinculadas aos trechos.
+  - Recusar quando não houver evidência.
+- Recuperação otimizada:
+  - MMR com `k` e `fetch_k` configuráveis.
+  - Deduplicação por fonte/página.
+  - Limite de contexto enviado ao LLM para reduzir latência.
